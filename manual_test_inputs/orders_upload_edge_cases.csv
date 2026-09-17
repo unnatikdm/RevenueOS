@@ -1,0 +1,4 @@
+id,tenant,timestamp,amount,total,tax,discounts,status,email,item_sku,item_name,units,rate,discount_amount,tax_amount,currency
+ORD-EDGE-001,tenant_apex_fashion,1789552800,"$2,499.00","$2,399.00","$431.82","$100.00",PAID,cust-edge-001@example.com,SKU-104,Air Cushion Pro Running Shoes,1,"$2,499.00","$100.00","$431.82",INR
+ORD-EDGE-002,tenant_apex_fashion,16/09/2026 18:45,1699.00,1699.00,305.82,0.00,PAID,cust-edge-002@example.com,SKU-305,Technical Bomber Jacket,0,1699.00,0.00,305.82,INR
+ORD-EDGE-003,tenant_apex_fashion,not-a-real-date,0.00,0.00,0.00,0.00,PENDING,cust-edge-003@example.com,SKU-GIFT,Manual Gift Adjustment,1,0.00,0.00,0.00,INR

@@ -1,0 +1,4 @@
+order_id,tenant_id,created_at,gross_amount,net_amount,currency,financial_status,customer_id,sku,title,quantity,unit_price,total_tax,total_discounts
+ORD-VALID-001,tenant_apex_fashion,2026-09-16T10:00:00Z,2499.00,2499.00,INR,PAID,CUST-201,SKU-104,Air Cushion Pro Running Shoes,1,2499.00,449.82,0.00
+,tenant_apex_fashion,2026-09-16T11:00:00Z,1899.00,1899.00,INR,PAID,CUST-202,SKU-208,Selvedge Denim,1,1899.00,341.82,0.00
+ORD-BAD-CURRENCY,tenant_apex_fashion,2026-09-16T12:00:00Z,1699.00,1699.00,US,PAID,CUST-203,SKU-305,Technical Bomber Jacket,1,1699.00,305.82,0.00

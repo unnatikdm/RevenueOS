@@ -65,6 +65,76 @@ class TestCsvNormalizer(unittest.TestCase):
         self.assertEqual(first_call["SK"], "ORD#ORD-001")
         self.assertEqual(first_call["GSI1-PK"], "TENANT#tenant_apex#ORD")
 
+    @patch("backend.functions.normalization.csv_normalizer.table")
+    @patch("backend.functions.normalization.csv_normalizer.s3_client")
+    def test_process_csv_file_vendor_aliases_multi_line_order_and_currency_values(self, mock_s3, mock_table):
+        csv_content = (
+            "order_number,merchant_id,client_id,date,currency_code,total_price,total,discounts,"
+            "total_tax_amount,payment_status,variant_sku,line_item_name,qty,price,discount_amount,tax_amount\n"
+            'ORD-ALIAS-001,tenant_apex,CUST-101,09/16/2026 14:05,INR,"$4,399.00","$4,099.00",'
+            '"$300.00","$737.82",PAID,SKU-104,Air Cushion Pro Running Shoes,1,"$2,500.00",0,"$450.00"\n'
+            'ORD-ALIAS-001,tenant_apex,CUST-101,09/16/2026 14:05,INR,"$4,399.00","$4,099.00",'
+            '"$300.00","$737.82",PAID,SKU-208,Selvedge Denim,1,"$1,899.00",0,"$287.82"\n'
+            "ORD-ALIAS-002,tenant_apex,CUST-102,2026/09/16 16:30:00,INR,,,,"
+            ",PAID,SKU-305,Technical Bomber,2,1699.00,50.00,611.64\n"
+        )
+        mock_body = MagicMock()
+        mock_body.read.return_value = csv_content.encode("utf-8")
+        mock_body.__iter__.return_value = [csv_content.encode("utf-8")]
+        mock_s3.get_object.return_value = {"Body": mock_body}
+
+        mock_batch = MagicMock()
+        mock_table.batch_writer.return_value.__enter__.return_value = mock_batch
+
+        result = process_csv_file("revenueos-raw-dev", "tenant_apex/csv/job_aliases.csv")
+
+        self.assertEqual(result["processed_rows"], 3)
+        self.assertEqual(result["error_rows_count"], 0)
+        self.assertEqual(mock_batch.put_item.call_count, 2)
+
+        first_order = mock_batch.put_item.call_args_list[0][1]["Item"]
+        self.assertEqual(first_order["order_id"], "ORD-ALIAS-001")
+        self.assertEqual(first_order["gross_amount"], "4399.00")
+        self.assertEqual(first_order["net_amount"], "4099.00")
+        self.assertEqual(first_order["total_tax"], "737.82")
+        self.assertEqual(first_order["total_discounts"], "300.00")
+        self.assertEqual(len(first_order["items"]), 2)
+
+        second_order = mock_batch.put_item.call_args_list[1][1]["Item"]
+        self.assertEqual(second_order["order_id"], "ORD-ALIAS-002")
+        self.assertEqual(second_order["gross_amount"], "3398.00")
+        self.assertEqual(second_order["net_amount"], "3398.00")
+        self.assertEqual(second_order["total_tax"], "611.64")
+        self.assertEqual(second_order["total_discounts"], "50.00")
+
+    @patch("backend.functions.normalization.csv_normalizer.table")
+    @patch("backend.functions.normalization.csv_normalizer.s3_client")
+    def test_process_csv_file_routes_invalid_rows_to_error_prefix(self, mock_s3, mock_table):
+        csv_content = (
+            "order_id,tenant_id,created_at,gross_amount,sku,title,quantity,unit_price\n"
+            "ORD-GOOD-001,tenant_apex,2026-09-16T10:00:00Z,2499.00,SKU-104,Running Shoes,1,2499.00\n"
+            ",tenant_apex,2026-09-16T11:00:00Z,1899.00,SKU-208,Denim,1,1899.00\n"
+        )
+        mock_body = MagicMock()
+        mock_body.read.return_value = csv_content.encode("utf-8")
+        mock_body.__iter__.return_value = [csv_content.encode("utf-8")]
+        mock_s3.get_object.return_value = {"Body": mock_body}
+
+        mock_batch = MagicMock()
+        mock_table.batch_writer.return_value.__enter__.return_value = mock_batch
+
+        result = process_csv_file("revenueos-raw-dev", "tenant_apex/csv/job_invalid.csv")
+
+        self.assertEqual(result["processed_rows"], 2)
+        self.assertEqual(result["error_rows_count"], 1)
+        self.assertEqual(mock_batch.put_item.call_count, 1)
+        mock_s3.put_object.assert_called_once()
+        error_write = mock_s3.put_object.call_args[1]
+        self.assertEqual(error_write["Key"], "tenant_apex/errors/job_invalid_errors.json")
+        error_rows = json.loads(error_write["Body"])
+        self.assertEqual(error_rows[0]["row_number"], 2)
+        self.assertIn("missing source order_id", error_rows[0]["error"])
+
     @patch("backend.functions.normalization.csv_normalizer.process_csv_file")
     def test_lambda_handler_sqs_trigger(self, mock_process):
         mock_process.return_value = {"tenant_id": "tenant_123", "status": "NORMALIZED"}

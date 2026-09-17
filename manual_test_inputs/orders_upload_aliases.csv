@@ -1,0 +1,4 @@
+order_number,merchant_id,client_id,date,currency_code,total_price,total,discounts,total_tax_amount,payment_status,variant_sku,line_item_name,qty,price,discount_amount,tax_amount
+ORD-ALIAS-001,tenant_apex_fashion,CUST-101,09/16/2026 14:05,INR,"$4,399.00","$4,099.00","$300.00","$737.82",PAID,SKU-104,Air Cushion Pro Running Shoes,1,"$2,500.00",0,"$450.00"
+ORD-ALIAS-001,tenant_apex_fashion,CUST-101,09/16/2026 14:05,INR,"$4,399.00","$4,099.00","$300.00","$737.82",PAID,SKU-208,Selvedge Denim,1,"$1,899.00",0,"$287.82"
+ORD-ALIAS-002,tenant_apex_fashion,CUST-102,2026/09/16 16:30:00,INR,,,,,PAID,SKU-305,Technical Bomber Jacket,2,1699.00,50.00,611.64

@@ -164,6 +164,8 @@ def order_to_dynamodb_item(order: CanonicalOrder) -> Dict[str, Any]:
         "created_at": created_iso,
         "gross_amount": str(order.gross_amount),
         "net_amount": str(order.net_amount),
+        "total_tax": str(order.total_tax),
+        "total_discounts": str(order.total_discounts),
         "currency": order.currency,
         "financial_status": order.financial_status,
         "items": [i.model_dump(mode="json") for i in order.items],
@@ -217,10 +219,17 @@ def process_csv_file(bucket: str, key: str) -> Dict[str, Any]:
                 raise ValueError("CSV row missing source order_id")
             gross_amount = parse_flexible_numeric(norm.get("gross_amount"), default=unit_price * qty)
             net_amount = parse_flexible_numeric(norm.get("net_amount"), default=gross_amount)
+            order_total_tax = parse_flexible_numeric(norm.get("total_tax"))
+            order_total_discounts = parse_flexible_numeric(norm.get("total_discounts"))
+            has_order_gross_amount = norm.get("gross_amount") not in (None, "")
+            has_order_net_amount = norm.get("net_amount") not in (None, "")
+            has_order_tax_amount = norm.get("total_tax") not in (None, "")
+            has_order_discount_amount = norm.get("total_discounts") not in (None, "")
 
             if order_id in validated_orders:
                 existing_order = validated_orders[order_id]
                 updated_items = list(existing_order.items) + [order_item]
+                line_amount = order_item.unit_price * order_item.quantity
                 validated_orders[order_id] = CanonicalOrder(
                     tenant_id=existing_order.tenant_id,
                     order_id=existing_order.order_id,
@@ -228,10 +237,18 @@ def process_csv_file(bucket: str, key: str) -> Dict[str, Any]:
                     customer_id=existing_order.customer_id,
                     created_at=existing_order.created_at,
                     currency=existing_order.currency,
-                    gross_amount=existing_order.gross_amount + (order_item.unit_price * order_item.quantity),
-                    net_amount=existing_order.net_amount + (order_item.unit_price * order_item.quantity),
-                    total_tax=existing_order.total_tax + order_item.tax_amount,
-                    total_discounts=existing_order.total_discounts + order_item.total_discount,
+                    gross_amount=max(existing_order.gross_amount, gross_amount)
+                    if has_order_gross_amount
+                    else existing_order.gross_amount + line_amount,
+                    net_amount=max(existing_order.net_amount, net_amount)
+                    if has_order_net_amount
+                    else existing_order.net_amount + line_amount,
+                    total_tax=max(existing_order.total_tax, order_total_tax)
+                    if has_order_tax_amount
+                    else existing_order.total_tax + order_item.tax_amount,
+                    total_discounts=max(existing_order.total_discounts, order_total_discounts)
+                    if has_order_discount_amount
+                    else existing_order.total_discounts + order_item.total_discount,
                     financial_status=existing_order.financial_status,
                     items=updated_items,
                 )
@@ -245,8 +262,14 @@ def process_csv_file(bucket: str, key: str) -> Dict[str, Any]:
                     currency=norm.get("currency") or "INR",
                     gross_amount=max(Decimal("0.00"), gross_amount),
                     net_amount=max(Decimal("0.00"), net_amount),
-                    total_tax=Decimal(str(norm.get("total_tax") or "0.00")),
-                    total_discounts=Decimal(str(norm.get("total_discounts") or "0.00")),
+                    total_tax=max(
+                        Decimal("0.00"),
+                        order_total_tax if has_order_tax_amount else item_tax,
+                    ),
+                    total_discounts=max(
+                        Decimal("0.00"),
+                        order_total_discounts if has_order_discount_amount else item_discount,
+                    ),
                     financial_status=norm.get("financial_status") or "PAID",
                     items=[order_item],
                 )
