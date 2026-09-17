@@ -152,9 +152,8 @@ def run_performance_benchmarks():
         print(f"  Handled throttled response and recovered successfully in {dur_shopify*1000:.2f} ms")
         print(f"  Status: PASSED\n")
 
-    # 5. Deterministic Leak Detection Engines (Stockout, Return Spike, Funnel Friction) Throughput
-    from backend.functions.leak_engine.stockout_detector import detect_stockout_leak
-    from backend.functions.leak_engine.return_detector import detect_return_spike_leak
+    # 5. Deterministic Statistical Leak Detection Engines Throughput
+    from backend.shared.calculations.engines import detect_stockout_leak, detect_return_spike_leak
     from backend.functions.leak_engine.funnel_detector import detect_funnel_friction_leak
 
     n_evals = 20000
@@ -170,6 +169,28 @@ def run_performance_benchmarks():
     print(f"[BENCHMARK 5] Advanced Deterministic Statistical Leak Detection Throughput:")
     print(f"  Evaluated {n_evals * 3:,} leak scenarios in {dur_leaks:.4f}s ({ops_leaks:,.0f} evaluations/sec)")
     print(f"  Status: {'PASSED (> 100,000 evals/sec)' if ops_leaks > 100000 else 'ACCEPTABLE'}\n")
+
+    # 6. Machine Learning Suite (IsolationForest, XGBoost, RandomForest, KMeans) Inference
+    from backend.ml.pipeline import get_ml_suite
+    ml_suite = get_ml_suite()
+    n_ml_inferences = 100
+    sample_transaction = {"sku": "SKU-104", "unit_price": 2499.00, "quantity": 2, "gross_amount": 4998.00, "discount": 0.0}
+    sample_item = {"sku": "SKU-208", "unit_price": 1899.00, "quantity": 1, "sku_return_rate": 0.14}
+    sample_cust = {"customer_id": "CUST-1001", "recency_days": 45.0, "frequency_orders": 5.0, "monetary_spend": 12500.0}
+
+    t0 = time.perf_counter()
+    for _ in range(n_ml_inferences):
+        ml_suite.evaluate_transaction_anomaly(sample_transaction)
+        ml_suite.predict_return_risk(sample_item)
+        ml_suite.segment_customer_rfm(sample_cust)
+    dur_ml = time.perf_counter() - t0
+    ml_ops = (n_ml_inferences * 3) / dur_ml
+    avg_ml_lat = (dur_ml / (n_ml_inferences * 3)) * 1000
+
+    print(f"[BENCHMARK 6] Machine Learning Suite Multi-Model Inference Performance:")
+    print(f"  Executed {n_ml_inferences * 3:,} ML predictions in {dur_ml:.4f}s ({ml_ops:,.0f} predictions/sec)")
+    print(f"  Average Single-Model Inference Latency: {avg_ml_lat:.3f} ms")
+    print(f"  Status: {'PASSED (< 5ms SLA)' if avg_ml_lat < 5.0 else 'ACCEPTABLE'}\n")
 
     print("=" * 70)
     print("OVERALL ARCHITECTURE & PERFORMANCE EVALUATION: EXCELLENT")

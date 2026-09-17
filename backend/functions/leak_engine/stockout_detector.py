@@ -35,4 +35,25 @@ def detect_stockout_leak(
     )
     if result.get("status") == "INSUFFICIENT_DATA":
         return None
-    return _legacy_numbers(result)
+    output = _legacy_numbers(result)
+
+    # Augment with ML Demand Forecaster
+    try:
+        from backend.ml.pipeline import get_ml_suite
+        ml_forecast = get_ml_suite().forecast_sku_demand(
+            historical_sales=daily_sales,
+            current_inventory=0,
+            asp=float(asp),
+            horizon_days=max(7, stockout_days),
+        )
+        output["evidence"]["ml_forecast"] = {
+            "projected_daily_velocity": ml_forecast["projected_daily_velocity"],
+            "stockout_risk_tier": ml_forecast["stockout_risk_tier"],
+            "estimated_uncaptured_revenue": ml_forecast["estimated_uncaptured_revenue"],
+            "model_confidence": ml_forecast["model_confidence"],
+            "model_engine": ml_forecast["model_engine"],
+        }
+    except Exception:
+        pass
+
+    return output

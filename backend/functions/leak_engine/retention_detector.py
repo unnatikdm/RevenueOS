@@ -57,20 +57,41 @@ def detect_retention_decay_leak(
     # Confidence scaling based on cohort size and z-score
     confidence = min(0.98, max(0.72, 0.78 + (0.04 * min(z_score, 4.0))))
 
+    evidence_dict: Dict[str, Any] = {
+        "cohort_size": cohort_size,
+        "baseline_repeat_rate": round(baseline_repeat_rate, 4),
+        "actual_repeat_rate": round(actual_repeat_rate, 4),
+        "retention_drop_percentage": retention_drop_pct,
+        "expected_repeat_customers": expected_repeat_customers,
+        "actual_repeat_customers": actual_repeat_customers,
+        "missed_repeat_customers": missed_customers,
+        "repeat_average_order_value": round(repeat_aov, 2),
+        "z_score": round(z_score, 2),
+    }
+
+    # Augment with K-Means Customer RFM Segment Telemetry
+    try:
+        from backend.ml.pipeline import get_ml_suite
+        ml_rfm = get_ml_suite().segment_customer_rfm({
+            "customer_id": cohort_id,
+            "recency_days": 60.0,
+            "frequency_orders": max(1, int(actual_repeat_customers / max(1, cohort_size * 0.1))),
+            "monetary_spend": float(actual_repeat_customers * repeat_aov),
+        })
+        evidence_dict["ml_rfm_segmentation"] = {
+            "segment_label": ml_rfm["segment_label"],
+            "churn_risk_score": ml_rfm["churn_risk_score"],
+            "projected_ltv_loss": ml_rfm["projected_ltv_loss"],
+            "recommended_action": ml_rfm["recommended_action"],
+            "model_status": ml_rfm["model_status"],
+        }
+    except Exception:
+        pass
+
     return {
         "leak_type": "retention",
         "entity_id": cohort_id,
         "impact_amount": lost_revenue,
         "confidence": round(confidence, 2),
-        "evidence": {
-            "cohort_size": cohort_size,
-            "baseline_repeat_rate": round(baseline_repeat_rate, 4),
-            "actual_repeat_rate": round(actual_repeat_rate, 4),
-            "retention_drop_percentage": retention_drop_pct,
-            "expected_repeat_customers": expected_repeat_customers,
-            "actual_repeat_customers": actual_repeat_customers,
-            "missed_repeat_customers": missed_customers,
-            "repeat_average_order_value": round(repeat_aov, 2),
-            "z_score": round(z_score, 2),
-        },
+        "evidence": evidence_dict,
     }

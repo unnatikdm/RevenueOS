@@ -33,4 +33,26 @@ def detect_price_elasticity_leak(
     )
     if result.get("status") == "INSUFFICIENT_DATA":
         return None
-    return _legacy_numbers(result)
+    output = _legacy_numbers(result)
+
+    # Augment with Isolation Forest Anomaly Detection
+    try:
+        from backend.ml.pipeline import get_ml_suite
+        ml_anomaly = get_ml_suite().evaluate_transaction_anomaly({
+            "sku": sku,
+            "unit_price": float(p2),
+            "quantity": int(q2),
+            "gross_amount": float(p2 * q2),
+            "discount": float(max(0.0, (p1 - p2) * q2)),
+        })
+        output["evidence"]["ml_anomaly_detection"] = {
+            "is_anomaly": ml_anomaly["is_anomaly"],
+            "anomaly_score": ml_anomaly["anomaly_score"],
+            "anomaly_type": ml_anomaly["anomaly_type"],
+            "exposure_estimate": ml_anomaly["exposure_estimate"],
+            "model_status": ml_anomaly["model_status"],
+        }
+    except Exception:
+        pass
+
+    return output

@@ -37,4 +37,24 @@ def detect_return_spike_leak(
     )
     if result.get("status") == "INSUFFICIENT_DATA":
         return None
-    return _legacy_numbers(result)
+    output = _legacy_numbers(result)
+
+    # Augment with ML Return Propensity
+    try:
+        from backend.ml.pipeline import get_ml_suite
+        ml_return = get_ml_suite().predict_return_risk({
+            "sku": sku,
+            "unit_price": float(asp),
+            "quantity": 1,
+            "sku_return_rate": float(eval_returns / eval_sales) if eval_sales > 0 else 0.05,
+        })
+        output["evidence"]["ml_return_propensity"] = {
+            "return_probability": ml_return["return_probability"],
+            "risk_tier": ml_return["risk_tier"],
+            "contributing_factors": ml_return["contributing_factors"],
+            "model_status": ml_return["model_status"],
+        }
+    except Exception:
+        pass
+
+    return output

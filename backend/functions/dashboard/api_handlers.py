@@ -180,6 +180,14 @@ def handle_get_dashboard(tenant_id: str) -> Dict[str, Any]:
         "retention": sum(float(l["impact_amount"]) for l in leaks if l.get("leak_type") == "retention"),
     }
 
+    # Query ML Suite status and metrics
+    ml_telemetry = {}
+    try:
+        from backend.ml.pipeline import get_ml_suite
+        ml_telemetry = get_ml_suite().get_health_status()
+    except Exception:
+        ml_telemetry = {"status": "FALLBACK", "models_loaded": False}
+
     payload = {
         "tenant_id": tenant_id,
         "kpi_ribbon": {
@@ -191,6 +199,7 @@ def handle_get_dashboard(tenant_id: str) -> Dict[str, Any]:
             "time_window_days": 90,
         },
         "category_breakdown": category_summary,
+        "ml_intelligence": ml_telemetry,
         "status": "HEALTHY",
     }
     return payload
@@ -331,5 +340,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "progress_percent": 0,
             "milestones": [],
         })
+
+    elif http_method == "GET" and "/ml/status" in raw_path:
+        from backend.ml.pipeline import get_ml_suite
+        return build_response(200, get_ml_suite().get_health_status())
 
     return build_response(404, {"error": f"Route not found: {http_method} {raw_path}"})
