@@ -1,0 +1,757 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  RevenueOS - Enterprise Serverless Revenue Leak Intelligence Platform.
+  Built natively on AWS primitives: DynamoDB, EventBridge, SQS, Step Functions, Bedrock, and Lambda.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment target environment
+
+  BedrockModelId:
+    Type: String
+    Default: us.anthropic.claude-3-5-sonnet-20240620-v1:0
+    Description: Bedrock Model ID used for root-cause diagnosis and playbooks
+
+  CognitoDomain:
+    Type: String
+    Default: revenueos-auth
+    Description: Domain prefix for Amazon Cognito Hosted UI
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.12
+    Architectures:
+      - arm64
+    Tracing: Active
+    Environment:
+      Variables:
+        ENV: !Ref Environment
+        APPLICATION_NAME: RevenueOS
+        LOG_LEVEL: INFO
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        CORE_TABLE_NAME: !Sub "RevenueOS_Core_${Environment}"
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: RevenueOS
+    Description: Autonomous Revenue Leak Intelligence Engine
+    SemanticVersion: 1.0.0
+
+Resources:
+  # Shared CloudWatch Log Group with 14-day retention
+  RevenueOSSharedLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/revenueos/${Environment}/application"
+      RetentionInDays: 14
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # Baseline IAM Execution Role for RevenueOS Serverless Compute
+  RevenueOSSharedExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "revenueos-${Environment}-shared-execution-role"
+      Description: Shared IAM Execution Role for RevenueOS Lambda Functions
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: BedrockConverseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: !Sub "arn:aws:bedrock:*::foundation-model/${BedrockModelId}"
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # DynamoDB Single-Table Storage Primitive.
+  # Entity key contracts:
+  # - Orders:    PK=TENANT#<tenant_id>, SK=ORD#<source>#<source_order_id>
+  # - Inventory: PK=TENANT#<tenant_id>, SK=INV#<sku>#<YYYY-MM-DD>
+  # - Order GSI: GSI1-PK=TENANT#<tenant_id>#ORD#<YYYY-MM>, GSI1-SK=<UTC YYYY-MM-DDTHH:MM:SS.fffZ>
+  CoreDynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "RevenueOS_Core_${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1-PK
+          AttributeType: S
+        - AttributeName: GSI1-SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1-PK
+              KeyType: HASH
+            - AttributeName: GSI1-SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl_epoch
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # Amazon S3 Bucket for Raw CSV Ingestion & Fallback Data Streams
+  IngestionBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "revenueos-raw-${AWS::AccountId}-${Environment}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - POST
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - 'http://localhost:5173'
+              - 'http://localhost:3000'
+              - !Sub "https://${Environment}.revenueos.ai"
+            MaxAge: 3600
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # Amazon EventBridge Custom Event Bus for Decoupled Ingestion & Event-Driven Triggers
+  EventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: RevenueOSEventBus
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # Amazon SQS Dead Letter Queue (DLQ) for Ingestion Failures
+  IngestionDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "revenueos-ingestion-dlq-${Environment}.fifo"
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # Amazon SQS FIFO Queue for CSV Ingestion Buffering & Rate Spike Protection
+  IngestionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "revenueos-ingestion-${Environment}.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      DeduplicationScope: messageGroup
+      FifoThroughputLimit: perMessageGroupId
+      VisibilityTimeout: 900  # 15 minutes matching Lambda execution limits
+      MessageRetentionPeriod: 86400  # 24 hours
+      KmsMasterKeyId: alias/aws/sqs
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestionDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Application
+          Value: RevenueOS
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: SAM
+
+  # SQS Policy permitting EventBridge to publish messages to the IngestionQueue
+  IngestionQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestionQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeToSendMessage
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IngestionQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt S3ObjectCreatedRule.Arn
+
+  # EventBridge Rule routing S3 ObjectCreated events from raw ingest prefix to IngestionQueue
+  S3ObjectCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "revenueos-s3-ingest-rule-${Environment}"
+      Description: Routes S3 ObjectCreated events for tenant CSV uploads to IngestionQueue FIFO
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - "Object Created"
+        detail:
+          bucket:
+            name:
+              - !Sub "revenueos-raw-${AWS::AccountId}-${Environment}"
+      Targets:
+        - Arn: !GetAtt IngestionQueue.Arn
+          Id: IngestionQueueFifoTarget
+          SqsParameters:
+            MessageGroupId: "CsvIngestGroup"
+
+  # Amazon Cognito User Pool with Email Sign-in, MFA support, and custom:tenant_id attribute
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "RevenueOS-UserPool-${Environment}"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: "OPTIONAL"
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      Schema:
+        - Name: tenant_id
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "64"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      UserPoolTags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Amazon Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "RevenueOS-WebClient-${Environment}"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+      ReadAttributes:
+        - email
+        - custom:tenant_id
+      WriteAttributes:
+        - email
+        - custom:tenant_id
+
+  # Amazon API Gateway HTTP API with JWT Authorizer
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
+        AllowOrigins:
+          - 'http://localhost:5173'
+          - 'http://localhost:3000'
+          - !Sub "https://${Environment}.revenueos.ai"
+        MaxAge: 3600
+      Auth:
+        DefaultAuthorizer: CognitoJwtAuthorizer
+        Authorizers:
+          CognitoJwtAuthorizer:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+              audience:
+                - !Ref UserPoolClient
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: S3 Presigned URL Generator
+  PresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-presigned-url"
+      Handler: backend/functions/ingestion/presigned_url.lambda_handler
+      CodeUri: ../
+      Description: Generate S3 presigned PUT URL for raw CSV/XLSX file ingestion
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub "revenueos-raw-${AWS::AccountId}-${Environment}"
+      Environment:
+        Variables:
+          INGESTION_BUCKET_NAME: !Ref IngestionBucket
+      Events:
+        PresignedUrlApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /uploads/presigned-url
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: S3 CSV Stream Normalizer
+  CsvNormalizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-csv-normalizer"
+      Handler: backend/functions/normalization/csv_normalizer.lambda_handler
+      CodeUri: ../
+      Description: Stream-processes CSV files from S3, normalizes to canonical entities, and batch-writes to DynamoDB
+      MemorySize: 512
+      Timeout: 900
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoreDynamoTable
+        - S3CrudPolicy:
+            BucketName: !Sub "revenueos-raw-${AWS::AccountId}-${Environment}"
+      Environment:
+        Variables:
+          CORE_TABLE_NAME: !Ref CoreDynamoTable
+          INGESTION_BUCKET_NAME: !Ref IngestionBucket
+          ORDER_GSI_MONTH_SHARDING: "true"
+      Events:
+        SqsIngestionEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestionQueue.Arn
+            BatchSize: 1
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: Shopify Admin GraphQL Ingestion Connector
+  ShopifyConnectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-shopify-connector"
+      Handler: backend/functions/connections/shopify_connector.lambda_handler
+      CodeUri: ../
+      Description: Connects to Shopify Admin GraphQL API with leaky-bucket rate limiting and writes canonical items to DynamoDB
+      MemorySize: 512
+      Timeout: 300
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoreDynamoTable
+        - Statement:
+            - Sid: SecretsManagerShopifyAccess
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:revenueos/shopify/*"
+      Environment:
+        Variables:
+          CORE_TABLE_NAME: !Ref CoreDynamoTable
+          SHOPIFY_API_VERSION: "2024-07"
+      Events:
+        DataSyncEvent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref EventBus
+            Pattern:
+              source:
+                - "revenueos.shopify"
+              detail-type:
+                - "DATA_SYNC_REQUESTED"
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: Data Normalization Error Handler & DLQ Consumer
+  IngestionErrorHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-dlq-error-handler"
+      Handler: backend/functions/normalization/error_handler.lambda_handler
+      CodeUri: ../
+      Description: Consumes ingestion poison pills from DLQ, audits failure stack traces, and records job status in DynamoDB
+      MemorySize: 256
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoreDynamoTable
+      Environment:
+        Variables:
+          CORE_TABLE_NAME: !Ref CoreDynamoTable
+      Events:
+        DlqEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestionDeadLetterQueue.Arn
+            BatchSize: 5
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: Bedrock Converse Reasoner
+  BedrockReasonerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-bedrock-reasoner"
+      Handler: backend/functions/ai/bedrock_reasoner.lambda_handler
+      CodeUri: ../
+      Description: Invokes Bedrock Converse API with tool schema enforcement for deterministic root-cause playbooks
+      MemorySize: 512
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoreDynamoTable
+        - Statement:
+            - Sid: BedrockInvokePolicy
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: !Sub "arn:aws:bedrock:*::foundation-model/${BedrockModelId}"
+      Environment:
+        Variables:
+          CORE_TABLE_NAME: !Ref CoreDynamoTable
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: Interactive Revenue Investigation Handler ("Ask RevenueOS")
+  AiInvestigateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-ai-investigate"
+      Handler: backend/functions/ai/investigate_handler.lambda_handler
+      CodeUri: ../
+      Description: Natural language conversational investigation handler grounded in precomputed DynamoDB leaks
+      MemorySize: 512
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoreDynamoTable
+        - Statement:
+            - Sid: BedrockInvestigateInvokePolicy
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: !Sub "arn:aws:bedrock:*::foundation-model/${BedrockModelId}"
+      Environment:
+        Variables:
+          CORE_TABLE_NAME: !Ref CoreDynamoTable
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Events:
+        AiInvestigateApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /ai/investigate
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # AWS Step Functions State Machine: Leak Orchestrator
+  LeakOrchestratorStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "RevenueOS-LeakOrchestrator-${Environment}"
+      DefinitionUri: statemachine/leak_orchestrator.asl.json
+      DefinitionSubstitutions:
+        CsvNormalizerFunctionArn: !GetAtt CsvNormalizerFunction.Arn
+        MetricAggregatorFunctionArn: !GetAtt PresignedUrlFunction.Arn
+        LeakDetectorFunctionArn: !GetAtt PresignedUrlFunction.Arn
+        OpportunityScorerFunctionArn: !GetAtt PresignedUrlFunction.Arn
+        BedrockReasonerFunctionArn: !GetAtt BedrockReasonerFunction.Arn
+        FinalizerFunctionArn: !GetAtt PresignedUrlFunction.Arn
+        IngestionErrorHandlerFunctionArn: !GetAtt IngestionErrorHandlerFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CsvNormalizerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref BedrockReasonerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref IngestionErrorHandlerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PresignedUrlFunction
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Function: Core Executive API Gateway Endpoints
+  CoreExecutiveApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "revenueos-${Environment}-executive-api"
+      Handler: backend/functions/dashboard/api_handlers.lambda_handler
+      CodeUri: ../
+      Description: Serves precomputed executive dashboard metrics, ranked leaks, and triggers Step Functions
+      MemorySize: 512
+      Timeout: 15
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoreDynamoTable
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !Sub "RevenueOS-LeakOrchestrator-${Environment}"
+      Environment:
+        Variables:
+          CORE_TABLE_NAME: !Ref CoreDynamoTable
+          STATE_MACHINE_ARN: !Ref LeakOrchestratorStateMachine
+      Events:
+        GetDashboard:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /dashboard
+            Method: GET
+        GetLeaks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /leaks
+            Method: GET
+        GetLeakDetail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /leaks/{id}
+            Method: GET
+        PostAnalysisStart:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /analysis/start
+            Method: POST
+        GetAnalysisStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /analysis/{id}
+            Method: GET
+      Tags:
+        Application: RevenueOS
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+Outputs:
+  Environment:
+    Description: Deployed Environment
+    Value: !Ref Environment
+
+  CoreDynamoTableName:
+    Description: Name of DynamoDB Core Table
+    Value: !Ref CoreDynamoTable
+    Export:
+      Name: !Sub "${AWS::StackName}-CoreDynamoTableName"
+
+  CoreDynamoTableArn:
+    Description: ARN of DynamoDB Core Table
+    Value: !GetAtt CoreDynamoTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CoreDynamoTableArn"
+
+  CoreDynamoTableStreamArn:
+    Description: ARN of DynamoDB Core Table Stream
+    Value: !GetAtt CoreDynamoTable.StreamArn
+    Export:
+      Name: !Sub "${AWS::StackName}-CoreDynamoTableStreamArn"
+
+  SharedExecutionRoleArn:
+    Description: ARN of Shared Execution Role
+    Value: !GetAtt RevenueOSSharedExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SharedExecutionRoleArn"
+
+  SharedLogGroupArn:
+    Description: ARN of Shared CloudWatch Log Group
+    Value: !GetAtt RevenueOSSharedLogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SharedLogGroupArn"
+
+  IngestionBucketName:
+    Description: Name of S3 Raw Ingestion Bucket
+    Value: !Ref IngestionBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestionBucketName"
+
+  IngestionBucketArn:
+    Description: ARN of S3 Raw Ingestion Bucket
+    Value: !GetAtt IngestionBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestionBucketArn"
+
+  EventBusName:
+    Description: Name of RevenueOS Custom EventBus
+    Value: !Ref EventBus
+    Export:
+      Name: !Sub "${AWS::StackName}-EventBusName"
+
+  EventBusArn:
+    Description: ARN of RevenueOS Custom EventBus
+    Value: !GetAtt EventBus.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EventBusArn"
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolArn"
+
+  UserPoolClientId:
+    Description: Cognito User Pool App Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+
+  HttpApiId:
+    Description: API Gateway HTTP API ID
+    Value: !Ref HttpApi
+    Export:
+      Name: !Sub "${AWS::StackName}-HttpApiId"
+
+  HttpApiUrl:
+    Description: API Gateway HTTP API Stage Endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-HttpApiUrl"
+
+  IngestionQueueUrl:
+    Description: URL of SQS Ingestion FIFO Queue
+    Value: !Ref IngestionQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestionQueueUrl"
+
+  IngestionQueueArn:
+    Description: ARN of SQS Ingestion FIFO Queue
+    Value: !GetAtt IngestionQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestionQueueArn"
+
+  IngestionDeadLetterQueueUrl:
+    Description: URL of SQS Ingestion Dead Letter Queue
+    Value: !Ref IngestionDeadLetterQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestionDeadLetterQueueUrl"
+
+  IngestionDeadLetterQueueArn:
+    Description: ARN of SQS Ingestion Dead Letter Queue
+    Value: !GetAtt IngestionDeadLetterQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestionDeadLetterQueueArn"
+
+
+

@@ -1,0 +1,4 @@
+order_id,tenant_id,created_at,gross_amount,net_amount,currency,financial_status,customer_id,sku,title,quantity,unit_price,total_tax,total_discounts
+ORD-MANUAL-001,tenant_apex_fashion,2026-09-15T09:00:00Z,4998.00,4998.00,INR,PAID,CUST-001,SKU-104,Air Cushion Pro Running Shoes - UK 9,2,2499.00,899.64,0.00
+ORD-MANUAL-002,tenant_apex_fashion,2026-09-15T10:15:00Z,1899.00,1899.00,INR,PAID,CUST-002,SKU-208,Selvedge Slim-Fit Stretch Denim - 32W,1,1899.00,341.82,0.00
+ORD-MANUAL-003,tenant_apex_fashion,2026-09-15T11:40:00Z,1699.00,1699.00,INR,PAID,CUST-003,SKU-305,All-Weather Technical Bomber Jacket,1,1699.00,305.82,0.00

@@ -1,0 +1,236 @@
+{
+  "Comment": "RevenueOS End-to-End Serverless Leak Detection & AI Remediation Orchestrator",
+  "StartAt": "NormalizeBatch",
+  "States": {
+    "NormalizeBatch": {
+      "Type": "Task",
+      "Resource": "${CsvNormalizerFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailureHandler",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "AggregateMetrics",
+      "ResultPath": "$.normalization_result"
+    },
+    "AggregateMetrics": {
+      "Type": "Task",
+      "Resource": "${MetricAggregatorFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailureHandler",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "DetectAllLeaksParallel",
+      "ResultPath": "$.metrics"
+    },
+    "DetectAllLeaksParallel": {
+      "Type": "Parallel",
+      "Comment": "Executes all 5 deterministic leak engines concurrently across products and orders",
+      "Branches": [
+        {
+          "StartAt": "DetectStockouts",
+          "States": {
+            "DetectStockouts": {
+              "Type": "Task",
+              "Resource": "${LeakDetectorFunctionArn}",
+              "Parameters": {
+                "engine": "stockout",
+                "tenant_id.$": "$.tenant_id",
+                "metrics.$": "$.metrics"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "DetectReturnSpikes",
+          "States": {
+            "DetectReturnSpikes": {
+              "Type": "Task",
+              "Resource": "${LeakDetectorFunctionArn}",
+              "Parameters": {
+                "engine": "return_spike",
+                "tenant_id.$": "$.tenant_id",
+                "metrics.$": "$.metrics"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "DetectCheckoutFriction",
+          "States": {
+            "DetectCheckoutFriction": {
+              "Type": "Task",
+              "Resource": "${LeakDetectorFunctionArn}",
+              "Parameters": {
+                "engine": "checkout_friction",
+                "tenant_id.$": "$.tenant_id",
+                "metrics.$": "$.metrics"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "DetectPricingElasticity",
+          "States": {
+            "DetectPricingElasticity": {
+              "Type": "Task",
+              "Resource": "${LeakDetectorFunctionArn}",
+              "Parameters": {
+                "engine": "pricing",
+                "tenant_id.$": "$.tenant_id",
+                "metrics.$": "$.metrics"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "DetectRetentionDecay",
+          "States": {
+            "DetectRetentionDecay": {
+              "Type": "Task",
+              "Resource": "${LeakDetectorFunctionArn}",
+              "Parameters": {
+                "engine": "retention",
+                "tenant_id.$": "$.tenant_id",
+                "metrics.$": "$.metrics"
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailureHandler",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "ScoreOpportunities",
+      "ResultPath": "$.detected_leak_batches"
+    },
+    "ScoreOpportunities": {
+      "Type": "Task",
+      "Resource": "${OpportunityScorerFunctionArn}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailureHandler",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "GeneratePlaybooksMap",
+      "ResultPath": "$.ranked_leaks"
+    },
+    "GeneratePlaybooksMap": {
+      "Type": "Map",
+      "Comment": "Concurrently executes Amazon Bedrock Converse API with tool enforcement for each verified leak",
+      "ItemsPath": "$.ranked_leaks.leaks",
+      "MaxConcurrency": 5,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "GenerateBedrockPlaybook",
+        "States": {
+          "GenerateBedrockPlaybook": {
+            "Type": "Task",
+            "Resource": "${BedrockReasonerFunctionArn}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 3,
+                "MaxAttempts": 2,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "PlaybookFailure",
+                "ResultPath": "$.playbook_error"
+              }
+            ],
+            "End": true
+          },
+          "PlaybookFailure": {
+            "Type": "Fail",
+            "Cause": "Bedrock playbook generation failed for a verified leak.",
+            "Error": "RevenueOSPlaybookGenerationError"
+          }
+        }
+      },
+      "Next": "FinalizeRun",
+      "ResultPath": "$.playbook_results"
+    },
+    "FinalizeRun": {
+      "Type": "Task",
+      "Resource": "${FinalizerFunctionArn}",
+      "End": true
+    },
+    "PipelineFailureHandler": {
+      "Type": "Task",
+      "Resource": "${IngestionErrorHandlerFunctionArn}",
+      "Next": "ExecutionFailed"
+    },
+    "ExecutionFailed": {
+      "Type": "Fail",
+      "Cause": "Pipeline state machine failed during execution.",
+      "Error": "RevenueOSOrchestrationError"
+    }
+  }
+}
