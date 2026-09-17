@@ -205,6 +205,7 @@ Resources:
     Properties:
       QueueName: !Sub "revenueos-ingestion-dlq-${Environment}.fifo"
       FifoQueue: true
+      VisibilityTimeout: 360
       MessageRetentionPeriod: 1209600  # 14 days
       KmsMasterKeyId: alias/aws/sqs
       Tags:
