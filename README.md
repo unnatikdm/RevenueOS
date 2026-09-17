@@ -280,7 +280,3 @@ Configuration parameters:
 | `POST` | `/connectors/shopify/sync` | Cognito JWT | Trigger automated ingestion from Shopify |
 
 ---
-
-## 🛡️ License
-
-Proprietary and Confidential. All Rights Reserved.
